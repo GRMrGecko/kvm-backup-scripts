@@ -19,6 +19,9 @@ export BORG_DELETE_I_KNOW_WHAT_I_AM_DOING=NO
 # Set to empty string to disable pruning.
 PRUNE_OPTIONS="--keep-daily 7 --keep-weekly 4 --keep-monthly 6"
 
+# Allows providing an argument of a domain to specifically backup.
+BACKUP_DOMAIN="$1"
+
 # I save the status in a temporary file so I can error out and exit if a failure occurs.
 DOMLIST_STATUS_TMP="/tmp/backup-image-domlist-tmp"
 while read -r line; do
@@ -28,6 +31,11 @@ while read -r line; do
 
     # If the domain is empty, its not needed.
     if [ -z "$DOMAIN" ]; then
+        continue
+    fi
+
+    # If a backup domain was provided, we're only going to backup that domain.
+    if [ -n "$BACKUP_DOMAIN" ] && [[ "$BACKUP_DOMAIN" != "$DOMAIN" ]]; then
         continue
     fi
 
