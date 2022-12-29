@@ -12,6 +12,11 @@ export BORG_REPO='/media/Storage/Backup/kvm'
 # If you have a passphrase for your repository,
 # set it here or you can use bash to retrieve it.
 # export BORG_PASSPHRASE=''
+# Set answers for automation.
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
+export BORG_RELOCATED_REPO_ACCESS_IS_OK=yes
+export BORG_CHECK_I_KNOW_WHAT_I_AM_DOING=NO
+export BORG_DELETE_I_KNOW_WHAT_I_AM_DOING=NO
 
 for IMAGE in $IMAGES; do
     # Export volume to borg backup.
