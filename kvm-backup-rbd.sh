@@ -17,6 +17,9 @@ export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
 export BORG_RELOCATED_REPO_ACCESS_IS_OK=yes
 export BORG_CHECK_I_KNOW_WHAT_I_AM_DOING=NO
 export BORG_DELETE_I_KNOW_WHAT_I_AM_DOING=NO
+# Set to empty string to disable pruning.
+PRUNE_OPTIONS="--keep-daily 7 --keep-weekly 4 --keep-monthly 6"
+
 
 for IMAGE in $IMAGES; do
     # Export volume to borg backup.
@@ -32,18 +35,18 @@ for IMAGE in $IMAGES; do
         exit 1
     fi
 
-    # If you want to prune backups, you can set the prune options.
-    echo "Pruning backups for $IMAGE"
-    borg prune --list \
-        --show-rc \
-        --glob-archives "$IMAGE-*" \
-        --keep-daily 7 \
-        --keep-weekly 4 \
-        --keep-monthly 6
+    # Prune if options are configured.
+    if [ -n "$PRUNE_OPTIONS" ]; then
+        echo "Pruning backups for $IMAGE"
+        borg prune --list \
+            --show-rc \
+            --glob-archives "$IMAGE-*" \
+            $PRUNE_OPTIONS
 
-    if [ $? -ne 0 ]; then
-        echo "Failed prune $IMAGE"
-        exit 1
+        if [ $? -ne 0 ]; then
+            echo "Failed to prune $DOMAIN"
+            exit 1
+        fi
     fi
 done
 
