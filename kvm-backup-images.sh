@@ -6,6 +6,23 @@
 # This also works with GlusterFS so long as your
 # volume is mounted.
 
+# A file to prevent overlapping runs. This allows us to make assumptions
+# that we're the only backup actively running, which allows us to recover
+# if a snapshot exists before backing up.
+PIDFILE="/tmp/backup-image.pid"
+
+# If the pid file exists and process is running, exit.
+if [ -f "$PIDFILE" ]; then
+    PID=$(cat "$PIDFILE")
+    if ps -p "$PID" >/dev/null; then
+        echo "Backup process already running, exiting."
+        exit 1
+    fi
+fi
+
+# Create a new pid file for this process.
+echo $BASHPID >"$PIDFILE"
+
 # The borg repository we're backing up to.
 export BORG_REPO='/media/Storage/Backup/kvm'
 # If you have a passphrase for your repository,
@@ -21,6 +38,34 @@ PRUNE_OPTIONS="--keep-daily 7 --keep-weekly 4 --keep-monthly 6"
 
 # Allows providing an argument of a domain to specifically backup.
 BACKUP_DOMAIN="$1"
+
+# Failures should remove pid file and exit with status code 1.
+fail() {
+    echo "$1"
+    rm "$PIDFILE"
+    exit 1
+}
+
+# If the domain is running, commit the changes saved to the snapshot to the image to finish the backup.
+blockCommit() {
+    DOMSTATUS="$1"
+    DOMAIN="$2"
+    DEV="$3"
+    if [[ "$DOMSTATUS" == "running" ]]; then
+        echo "Commit changes for $DOMAIN ($DEV)"
+        virsh blockcommit \
+            "$DOMAIN" \
+            "$DEV" \
+            --active \
+            --verbose \
+            --pivot \
+            --delete
+
+        if [ $? -ne 0 ]; then
+            fail "Could not commit changes $DOMAIN ($DEV). This may be a major issue and VM may be broken now."
+        fi
+    fi
+}
 
 # I save the status in a temporary file so I can error out and exit if a failure occurs.
 DOMLIST_STATUS_TMP="/tmp/backup-image-domlist-tmp"
@@ -75,17 +120,35 @@ while read -r line; do
 
     # If status has an error, exit.
     if [ $status -ne 0 ]; then
-        echo "Domain block listing failed"
-        exit 1
+        fail "Domain block listing failed"
     fi
 
     # For each image we can backup, back it up.
     for ((i = 0; i < ${#DEVS[@]}; i++)); do
         DEV=${DEVS[$i]}
         IMAGE=${IMAGES[$i]}
+        IMAGEEXTENSION="${IMAGE##*.}"
+        IMAGESNAPSHOT="${IMAGE%.*}.backup"
+        IMAGENAME=$(basename "$IMAGE")
 
         # If the domain is running, we need to snapshot the disk so we can backup cleanly.
         if [[ "$DOMSTATUS" == "running" ]]; then
+            # If the snapshot file exists, we should commit changes before performing another snapshot.
+            # We are assuming that we created the snapshot here, and that concurrent runs are not possible.
+            if [ -e "$IMAGESNAPSHOT" ]; then
+                # Commit any blocks.
+                blockCommit "$DOMSTATUS" "$DOMAIN" "$DEV"
+            fi
+
+            # Its possible that the image extension was changed to backup if a snapshot was previously made.
+            # We assume it should be qcow2, and if that does not exist we will exit.
+            if [[ "$IMAGEEXTENSION" == "backup" ]]; then
+                IMAGE="${IMAGE%.*}.qcow2"
+                if ! [ -f "$IMAGE" ]; then
+                    fail "Unable to determine image name."
+                fi
+            fi
+
             echo "Creating snapshot for $DOMAIN ($DEV)"
             virsh snapshot-create-as --domain "$DOMAIN" \
                 --name backup \
@@ -95,15 +158,13 @@ while read -r line; do
                 --diskspec $DEV,snapshot=external
 
             if [ $? -ne 0 ]; then
-                echo "Failed to create snapshot for $DOMAIN ($DEV)"
-                exit 1
+                fail "Failed to create snapshot for $DOMAIN ($DEV)"
             fi
         fi
 
         # Backup the image.
-        echo "Creating backup for $DOMAIN ($DEV)"
-        IMAGENAME=$(basename "$IMAGE")
-        cat "$IMAGE" | pv | borg create \
+        echo "Creating backup for $DOMAIN ($DEV [$IMAGE])"
+        pv "$IMAGE" | borg create \
             --verbose \
             --stats \
             --show-rc \
@@ -111,8 +172,9 @@ while read -r line; do
             "::$DOMAIN-$DEV-{now}" -
 
         if [ $? -ne 0 ]; then
-            echo "Failed to backup $DOMAIN ($DEV)"
-            exit 1
+            # Commit any blocks.
+            blockCommit "$DOMSTATUS" "$DOMAIN" "$DEV"
+            fail "Failed to backup $DOMAIN ($DEV)"
         fi
 
         # Prune if options are configured.
@@ -124,27 +186,14 @@ while read -r line; do
                 $PRUNE_OPTIONS
 
             if [ $? -ne 0 ]; then
-                echo "Failed to prune $DOMAIN ($DEV)"
-                exit 1
+                # Commit any blocks.
+                blockCommit "$DOMSTATUS" "$DOMAIN" "$DEV"
+                fail "Failed to prune $DOMAIN ($DEV)"
             fi
         fi
 
-        # If the domain is running, commit the changes saved to the snapshot to the image to finish the backup.
-        if [[ "$DOMSTATUS" == "running" ]]; then
-            echo "Commit changes for $DOMAIN ($DEV)"
-            virsh blockcommit \
-                "$DOMAIN" \
-                "$DEV" \
-                --active \
-                --verbose \
-                --pivot \
-                --delete
-
-            if [ $? -ne 0 ]; then
-                echo "Could not commit changes $DOMAIN ($DEV). This may be a major issue and VM may be broken now."
-                exit 1
-            fi
-        fi
+        # Commit any blocks.
+        blockCommit "$DOMSTATUS" "$DOMAIN" "$DEV"
     done
 
     # Backup the domain info.
@@ -156,8 +205,7 @@ while read -r line; do
         "::$DOMAIN-xml-{now}" -
 
     if [ $? -ne 0 ]; then
-        echo "Failed to backup $DOMAIN"
-        exit 1
+        fail "Failed to backup $DOMAIN"
     fi
 
     # Prune if options are configured.
@@ -169,8 +217,7 @@ while read -r line; do
             $PRUNE_OPTIONS
 
         if [ $? -ne 0 ]; then
-            echo "Failed to prune $DOMAIN"
-            exit 1
+            fail "Failed to prune $DOMAIN"
         fi
     fi
 done < <(
@@ -187,9 +234,10 @@ fi
 
 # If status has an error, exit.
 if [ $status -ne 0 ]; then
-    echo "Domain listing failed"
-    exit 1
+    fail "Domain listing failed"
 fi
 
 # Shrink repo.
 borg compact
+
+rm "$PIDFILE"

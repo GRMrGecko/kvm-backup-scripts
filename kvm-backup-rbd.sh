@@ -3,6 +3,21 @@
 
 # This is for backing up Rados Block Device (Ceph) storage.
 
+# A file to prevent overlapping runs.
+PIDFILE="/tmp/backup-image.pid"
+
+# If the pid file exists and process is running, exit.
+if [ -f "$PIDFILE" ]; then
+    PID=$(cat "$PIDFILE")
+    if ps -p "$PID" >/dev/null; then
+        echo "Backup process already running, exiting."
+        exit 1
+    fi
+fi
+
+# Create a new pid file for this process.
+echo $BASHPID >"$PIDFILE"
+
 # The pool in Ceph that you would like to backup.
 POOL="libvirt"
 # Pull images in pull from rbd driver.
@@ -20,6 +35,12 @@ export BORG_DELETE_I_KNOW_WHAT_I_AM_DOING=NO
 # Set to empty string to disable pruning.
 PRUNE_OPTIONS="--keep-daily 7 --keep-weekly 4 --keep-monthly 6"
 
+# Failures should remove pid file and exit with status code 1.
+fail() {
+    echo "$1"
+    rm "$PIDFILE"
+    exit 1
+}
 
 for IMAGE in $IMAGES; do
     # Export volume to borg backup.
@@ -31,8 +52,7 @@ for IMAGE in $IMAGES; do
         "::$IMAGE-{now}" -
 
     if [ $? -ne 0 ]; then
-        echo "Failed to backup $IMAGE"
-        exit 1
+        fail "Failed to backup $IMAGE"
     fi
 
     # Prune if options are configured.
@@ -44,8 +64,7 @@ for IMAGE in $IMAGES; do
             $PRUNE_OPTIONS
 
         if [ $? -ne 0 ]; then
-            echo "Failed to prune $DOMAIN"
-            exit 1
+            fail "Failed to prune $DOMAIN"
         fi
     fi
 done
@@ -65,8 +84,7 @@ while read -r line; do
         "::$DOMAIN-xml-{now}" -
 
     if [ $? -ne 0 ]; then
-        echo "Failed to backup $DOMAIN"
-        exit 1
+        fail "Failed to backup $DOMAIN"
     fi
 
     # Prune if options are configured.
@@ -78,8 +96,7 @@ while read -r line; do
             $PRUNE_OPTIONS
 
         if [ $? -ne 0 ]; then
-            echo "Failed to prune $DOMAIN"
-            exit 1
+            fail "Failed to prune $DOMAIN"
         fi
     fi
 done < <(
@@ -96,9 +113,10 @@ fi
 
 # If status has an error, exit.
 if [ $status -ne 0 ]; then
-    echo "Domain listing failed"
-    exit 1
+    fail "Domain listing failed"
 fi
 
 # Shrink repo.
 borg compact
+
+rm "$PIDFILE"
