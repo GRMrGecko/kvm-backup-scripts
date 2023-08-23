@@ -108,7 +108,7 @@ while read -r line; do
         IMAGES+=("$IMAGE")
     done < <(
         virsh domblklist $DOMAIN | tail -n +3
-        echo $? >$BLKLIST_STATUS_TMP
+        echo ${PIPESTATUS[0]} >$BLKLIST_STATUS_TMP
     )
 
     # Get status from the block listing.
@@ -222,7 +222,7 @@ while read -r line; do
     fi
 done < <(
     virsh list --all | tail -n +3
-    echo $? >$DOMLIST_STATUS_TMP
+    echo ${PIPESTATUS[0]} >$DOMLIST_STATUS_TMP
 )
 
 # Get status from the domain listing.
