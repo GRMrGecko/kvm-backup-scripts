@@ -12,7 +12,7 @@
 PIDFILE="/tmp/backup-image.pid"
 
 # If the pid file exists and process is running, exit.
-if [ -f "$PIDFILE" ]; then
+if [[ -f "$PIDFILE" ]]; then
     PID=$(cat "$PIDFILE")
     if ps -p "$PID" >/dev/null; then
         echo "Backup process already running, exiting."
@@ -36,13 +36,18 @@ export BORG_DELETE_I_KNOW_WHAT_I_AM_DOING=NO
 # Set to empty string to disable pruning.
 PRUNE_OPTIONS="--keep-daily 7 --keep-weekly 4 --keep-monthly 6"
 
+# Remove PID file on exit.
+cleanup() {
+    rm "$PIDFILE"
+}
+trap cleanup EXIT
+
 # Allows providing an argument of a domain to specifically backup.
 BACKUP_DOMAIN="$1"
 
 # Failures should remove pid file and exit with status code 1.
 fail() {
     echo "$1"
-    rm "$PIDFILE"
     exit 1
 }
 
@@ -53,15 +58,14 @@ blockCommit() {
     DEV="$3"
     if [[ "$DOMSTATUS" == "running" ]]; then
         echo "Commit changes for $DOMAIN ($DEV)"
-        virsh blockcommit \
-            "$DOMAIN" \
-            "$DEV" \
-            --active \
-            --verbose \
-            --pivot \
-            --delete
 
-        if [ $? -ne 0 ]; then
+        if ! virsh blockcommit \
+                "$DOMAIN" \
+                "$DEV" \
+                --active \
+                --verbose \
+                --pivot \
+                --delete; then
             fail "Could not commit changes $DOMAIN ($DEV). This may be a major issue and VM may be broken now."
         fi
     fi
@@ -69,18 +73,14 @@ blockCommit() {
 
 # I save the status in a temporary file so I can error out and exit if a failure occurs.
 DOMLIST_STATUS_TMP="/tmp/backup-image-domlist-tmp"
-while read -r line; do
-    # Extract the domain name and status from the line.
-    DOMAIN=$(echo $line | awk '{print $2}')
-    DOMSTATUS=$(echo $line | awk '{for (i=3; i<NF; i++) printf $i " "; if (NF>=3) print $NF}')
-
+while read -r _ DOMAIN DOMSTATUS; do
     # If the domain is empty, its not needed.
-    if [ -z "$DOMAIN" ]; then
+    if [[ -z "$DOMAIN" ]]; then
         continue
     fi
 
     # If a backup domain was provided, we're only going to backup that domain.
-    if [ -n "$BACKUP_DOMAIN" ] && [[ "$BACKUP_DOMAIN" != "$DOMAIN" ]]; then
+    if [[ -n "$BACKUP_DOMAIN" ]] && [[ "$BACKUP_DOMAIN" != "$DOMAIN" ]]; then
         continue
     fi
 
@@ -88,13 +88,9 @@ while read -r line; do
     DEVS=()
     IMAGES=()
     BLKLIST_STATUS_TMP="/tmp/backup-image-blklist-tmp"
-    while read -r line; do
-        # Extract the device and image from the line.
-        DEV=$(echo $line | awk '{print $1}')
-        IMAGE=$(echo $line | awk '{for (i=2; i<NF; i++) printf $i " "; if (NF>=2) print $NF}')
-
+    while read -r DEV IMAGE; do
         # Ignore empty line or no image.
-        if [ -z "$IMAGE" ] || [[ "$IMAGE" == "-" ]]; then
+        if [[ -z "$IMAGE" ]] || [[ "$IMAGE" == "-" ]]; then
             continue
         fi
 
@@ -103,23 +99,28 @@ while read -r line; do
             continue
         fi
 
+        # Ignore non-image files.
+        if ! [[ "$IMAGE" =~ ^\/ ]]; then
+            continue
+        fi
+
         # This image needs backing up.
         DEVS+=("$DEV")
         IMAGES+=("$IMAGE")
     done < <(
-        virsh domblklist $DOMAIN | tail -n +3
-        echo ${PIPESTATUS[0]} >$BLKLIST_STATUS_TMP
+        virsh domblklist "$DOMAIN" | tail -n +3
+        echo "${PIPESTATUS[0]}" >"$BLKLIST_STATUS_TMP"
     )
 
     # Get status from the block listing.
     status=1
-    if [ -f $BLKLIST_STATUS_TMP ]; then
-        status=$(cat $BLKLIST_STATUS_TMP)
-        rm $BLKLIST_STATUS_TMP
+    if [[ -f $BLKLIST_STATUS_TMP ]]; then
+        status=$(cat "$BLKLIST_STATUS_TMP")
+        rm "$BLKLIST_STATUS_TMP"
     fi
 
     # If status has an error, exit.
-    if [ $status -ne 0 ]; then
+    if ((status!=0)); then
         fail "Domain block listing failed"
     fi
 
@@ -135,7 +136,7 @@ while read -r line; do
         if [[ "$DOMSTATUS" == "running" ]]; then
             # If the snapshot file exists, we should commit changes before performing another snapshot.
             # We are assuming that we created the snapshot here, and that concurrent runs are not possible.
-            if [ -e "$IMAGESNAPSHOT" ]; then
+            if [[ -e "$IMAGESNAPSHOT" ]]; then
                 # Commit any blocks.
                 blockCommit "$DOMSTATUS" "$DOMAIN" "$DEV"
             fi
@@ -150,42 +151,36 @@ while read -r line; do
             fi
 
             echo "Creating snapshot for $DOMAIN ($DEV)"
-            virsh snapshot-create-as --domain "$DOMAIN" \
-                --name backup \
-                --no-metadata \
-                --atomic \
-                --disk-only \
-                --diskspec $DEV,snapshot=external
-
-            if [ $? -ne 0 ]; then
+            if ! virsh snapshot-create-as --domain "$DOMAIN" \
+                    --name backup \
+                    --no-metadata \
+                    --atomic \
+                    --disk-only \
+                    --diskspec "$DEV,snapshot=external"; then
                 fail "Failed to create snapshot for $DOMAIN ($DEV)"
             fi
         fi
 
         # Backup the image.
         echo "Creating backup for $DOMAIN ($DEV [$IMAGE])"
-        pv "$IMAGE" | borg create \
-            --verbose \
-            --stats \
-            --show-rc \
-            --stdin-name "$IMAGENAME" \
-            "::$DOMAIN-$DEV-{now}" -
-
-        if [ $? -ne 0 ]; then
+        if ! pv "$IMAGE" | borg create \
+                --verbose \
+                --stats \
+                --show-rc \
+                --stdin-name "$IMAGENAME" \
+                "::$DOMAIN-$DEV-{now}" -; then
             # Commit any blocks.
             blockCommit "$DOMSTATUS" "$DOMAIN" "$DEV"
             fail "Failed to backup $DOMAIN ($DEV)"
         fi
 
         # Prune if options are configured.
-        if [ -n "$PRUNE_OPTIONS" ]; then
+        if [[ -n "$PRUNE_OPTIONS" ]]; then
             echo "Pruning backups for $DOMAIN ($DEV)"
-            borg prune --list \
-                --show-rc \
-                --glob-archives "$DOMAIN-$DEV-*" \
-                $PRUNE_OPTIONS
-
-            if [ $? -ne 0 ]; then
+            if ! eval borg prune --list \
+                    --show-rc \
+                    --glob-archives "'$DOMAIN-$DEV-*'" \
+                    "$PRUNE_OPTIONS"; then
                 # Commit any blocks.
                 blockCommit "$DOMSTATUS" "$DOMAIN" "$DEV"
                 fail "Failed to prune $DOMAIN ($DEV)"
@@ -198,46 +193,40 @@ while read -r line; do
 
     # Backup the domain info.
     echo "Backing up $DOMAIN xml"
-    virsh dumpxml "$DOMAIN" | borg create \
-        --verbose \
-        --stats \
-        --show-rc \
-        "::$DOMAIN-xml-{now}" -
-
-    if [ $? -ne 0 ]; then
+    if ! virsh dumpxml "$DOMAIN" | borg create \
+            --verbose \
+            --stats \
+            --show-rc \
+            "::$DOMAIN-xml-{now}" -; then
         fail "Failed to backup $DOMAIN"
     fi
 
     # Prune if options are configured.
-    if [ -n "$PRUNE_OPTIONS" ]; then
+    if [[ -n "$PRUNE_OPTIONS" ]]; then
         echo "Pruning backups for $IMAGE"
-        borg prune --list \
-            --show-rc \
-            --glob-archives "$DOMAIN-xml-*" \
-            $PRUNE_OPTIONS
-
-        if [ $? -ne 0 ]; then
+        if ! eval borg prune --list \
+                --show-rc \
+                --glob-archives "'$DOMAIN-xml-*'" \
+                "$PRUNE_OPTIONS"; then
             fail "Failed to prune $DOMAIN"
         fi
     fi
 done < <(
     virsh list --all | tail -n +3
-    echo ${PIPESTATUS[0]} >$DOMLIST_STATUS_TMP
+    echo "${PIPESTATUS[0]}" >"$DOMLIST_STATUS_TMP"
 )
 
 # Get status from the domain listing.
 status=1
-if [ -f $DOMLIST_STATUS_TMP ]; then
-    status=$(cat $DOMLIST_STATUS_TMP)
-    rm $DOMLIST_STATUS_TMP
+if [[ -f $DOMLIST_STATUS_TMP ]]; then
+    status=$(cat "$DOMLIST_STATUS_TMP")
+    rm "$DOMLIST_STATUS_TMP"
 fi
 
 # If status has an error, exit.
-if [ $status -ne 0 ]; then
+if ((status!=0)); then
     fail "Domain listing failed"
 fi
 
 # Shrink repo.
 borg compact
-
-rm "$PIDFILE"
