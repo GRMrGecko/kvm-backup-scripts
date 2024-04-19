@@ -151,9 +151,9 @@ while read -r _ DOMAIN _; do
     for ((i = 0; i < ${#DEVS[@]}; i++)); do
         DEV=${DEVS[$i]}
         IMAGE=${IMAGES[$i]}
-        RBD_POOL=${IMAGE%/*}
-        RBD_IMAGE=${IMAGE##*/}
-        BACKUP_NAME="${RBD_POOL}_${RBD_IMAGE}"
+        # RBD_POOL=${IMAGE%/*}
+        # RBD_IMAGE=${IMAGE##*/}
+        # BACKUP_NAME="${RBD_POOL}_${RBD_IMAGE}"
 
         # Create a snapshot.
         rbd snap create "$IMAGE@$SNAPSHOT_NAME"
@@ -164,7 +164,7 @@ while read -r _ DOMAIN _; do
                 --verbose \
                 --stats \
                 --show-rc \
-                "::$BACKUP_NAME-{now}" -; then
+                "::$DOMAIN-$DEV-{now}" -; then
             fail "Failed to backup $IMAGE"
         fi
 
@@ -173,7 +173,7 @@ while read -r _ DOMAIN _; do
             echo "Pruning backups for $IMAGE"
             if ! eval borg prune --list \
                     --show-rc \
-                    --glob-archives "'$BACKUP_NAME-*'" \
+                    --glob-archives "'$DOMAIN-$DEV-*'" \
                     "$PRUNE_OPTIONS"; then
                 fail "Failed to prune $DOMAIN"
             fi
